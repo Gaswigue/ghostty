@@ -44,6 +44,12 @@ demand: std.atomic.Value(u32) = .init(0),
 /// `yieldToDemand` knows the waiter had its turn.
 handoff_gen: std.atomic.Value(u32) = .init(0),
 
+/// Smooth scrolling handoff. The IO/surface thread accumulates pending
+/// scroll deltas (in pixels) here and the renderer consumes them each frame
+/// to advance a fractional viewport offset. Only used when the
+/// `mouse-scroll-smooth` config is enabled. Protected by `mutex`.
+smooth_scroll: SmoothScroll = .{},
+
 /// How long `yieldToDemand` sleeps waiting for a demanding waiter to
 /// take its turn before giving up. This bounds how long the IO parse
 /// thread can stall if a wake is lost or the waiter is descheduled; a
@@ -102,6 +108,25 @@ pub fn yieldToDemand(self: *State) void {
         handoff_timeout_ns,
     ) catch {};
 }
+
+pub const SmoothScroll = struct {
+    /// Pending vertical scroll in pixels not yet consumed by the renderer.
+    /// Positive scrolls the viewport toward the bottom (newest content).
+    /// The surface thread adds to this; the renderer zeroes it each frame.
+    input_px: f64 = 0,
+
+    /// Whether the pending input should be eased over several frames
+    /// (discrete mouse wheel) or applied immediately (precise trackpad).
+    /// Reflects the most recent input event.
+    animate: bool = false,
+
+    /// The fractional viewport offset (in pixels, [0, cell height)) that is
+    /// currently rendered. The renderer publishes this each frame; the
+    /// surface thread reads it to map mouse positions to the shifted grid
+    /// (selection, clicks). Without this the visible content and hit-testing
+    /// disagree by up to one row.
+    offset_px: f64 = 0,
+};
 
 pub const Mouse = struct {
     /// The point on the viewport where the mouse currently is. We use

@@ -23,6 +23,9 @@ layout(binding = 1, std140) uniform Globals {
     uniform uint cursor_color_packed_4u8;
     uniform uint bg_color_packed_4u8;
     uniform uint bools;
+    // Vertical smooth-scroll offset in pixels. Content is shifted up by this
+    // amount to render a sub-cell (fractional) scroll position.
+    uniform float scroll_offset;
 };
 
 // Bools

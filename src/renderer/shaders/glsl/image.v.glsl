@@ -39,8 +39,9 @@ void main() {
     tex_coord /= textureSize(image, 0);
 
     // The position of our image starts at the top-left of the grid cell and
-    // adds the source rect width/height components.
-    vec2 image_pos = (cell_size * grid_pos) + cell_offset;
+    // adds the source rect width/height components. Shift up by the
+    // smooth-scroll offset so images track the text grid.
+    vec2 image_pos = (cell_size * grid_pos) + cell_offset - vec2(0.0, scroll_offset);
     image_pos += dest_size * corner;
 
     gl_Position = projection_matrix * vec4(image_pos.xy, 1.0, 1.0);

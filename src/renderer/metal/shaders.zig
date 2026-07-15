@@ -252,6 +252,11 @@ pub const Uniforms = extern struct {
         use_linear_correction: bool align(1) = false,
     },
 
+    /// Vertical smooth-scroll offset in pixels. Content is shifted up by this
+    /// amount to render a sub-cell (fractional) scroll position. See
+    /// `mouse-scroll-smooth`.
+    scroll_offset: f32 align(4) = 0,
+
     const PaddingExtend = packed struct(u8) {
         left: bool = false,
         right: bool = false,

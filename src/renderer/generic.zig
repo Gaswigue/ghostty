@@ -131,6 +131,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         last_bottom_node: ?usize,
         last_bottom_y: terminal.size.CellCountInt,
 
+        /// Smooth scrolling animation state (see `mouse-scroll-smooth`). This
+        /// is owned and mutated only by the render thread. `scroll_offset_px`
+        /// is the current sub-cell offset (in pixels) applied to the grid via
+        /// the `scroll_offset` uniform; `scroll_remaining_px` is the amount of
+        /// scroll motion still to be eased out (discrete wheel) or applied
+        /// (precise); `scroll_animating` is true while an eased animation is in
+        /// flight; `scroll_dirty` forces a redraw when the offset changes.
+        scroll_remaining_px: f64 = 0,
+        scroll_offset_px: f64 = 0,
+        scroll_animating: bool = false,
+        scroll_dirty: bool = false,
+        scroll_last_frame: ?std.time.Instant = null,
+
         /// The most recent viewport matches so that we can render search
         /// matches in the visible frame. This is provided asynchronously
         /// from the search thread so we have the dirty flag to also note
@@ -1014,6 +1027,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             return self.has_custom_shaders;
         }
 
+        /// True while a smooth scroll animation is in flight. The render
+        /// thread uses this to keep driving frames until the scroll settles.
+        /// See `mouse-scroll-smooth`.
+        pub fn hasScrollAnimation(self: *const Self) bool {
+            return self.scroll_animating;
+        }
+
         /// True if our renderer is using vsync. If true, the renderer or apprt
         /// is responsible for triggering draw_now calls to the render thread.
         /// That is the only way to trigger a drawFrame.
@@ -1199,6 +1219,132 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                     // Scroll
                     state.terminal.scrollViewport(.bottom);
+                }
+
+                // Smooth scrolling: consume any pending scroll input from the
+                // surface thread and advance our fractional viewport offset.
+                // We do this before updating our terminal state so any whole
+                // rows we step out of the offset are reflected this frame. See
+                // `mouse-scroll-smooth`.
+                smooth: {
+                    // Time constant of the exponential glide toward the scroll
+                    // target. The animation covers ~95% of the distance in
+                    // 3*tau (~200ms), which matches the "buttery" feel of
+                    // other smooth-scrolling terminals/editors.
+                    const scroll_tau_ms: f64 = 65.0;
+                    // Below this many pixels we snap to the target so the
+                    // animation actually terminates.
+                    const scroll_min_step: f64 = 0.5;
+
+                    const cell_h: f64 = @floatFromInt(self.grid_metrics.cell_height);
+                    if (cell_h <= 0) break :smooth;
+
+                    // Ingest new input from the surface thread.
+                    const input_px = state.smooth_scroll.input_px;
+                    const animate = state.smooth_scroll.animate;
+                    state.smooth_scroll.input_px = 0;
+
+                    // If there's no new input and nothing left to ease, we're
+                    // at a steady state. The offset (if any) is already applied
+                    // so there's nothing to redraw.
+                    if (input_px == 0 and self.scroll_remaining_px == 0) {
+                        self.scroll_animating = false;
+                        self.scroll_last_frame = null;
+
+                        // If the viewport was scrolled to the bottom by
+                        // something other than us (new output, entering the
+                        // alternate screen), drop any residual offset so the
+                        // content isn't left shifted by a fraction of a cell.
+                        if (self.scroll_offset_px != 0 and
+                            state.terminal.screens.active.pages.viewport == .active)
+                        {
+                            self.scroll_offset_px = 0;
+                            self.uniforms.scroll_offset = 0;
+                            state.smooth_scroll.offset_px = 0;
+                            self.scroll_dirty = true;
+                        }
+                        break :smooth;
+                    }
+
+                    self.scroll_remaining_px += input_px;
+
+                    // Real elapsed time since the previous animation frame so
+                    // the glide speed is independent of the actual frame rate.
+                    // Clamped so a stalled frame (or the first frame of a new
+                    // animation) doesn't jump the whole distance at once.
+                    const dt_ms: f64 = dt: {
+                        const now = std.time.Instant.now() catch break :dt 8.0;
+                        defer self.scroll_last_frame = now;
+                        const last = self.scroll_last_frame orelse break :dt 8.0;
+                        const dt: f64 = @as(f64, @floatFromInt(now.since(last))) / std.time.ns_per_ms;
+                        break :dt @min(dt, 50.0);
+                    };
+                    const scroll_ease: f64 = 1.0 - @exp(-dt_ms / scroll_tau_ms);
+
+                    // Determine how much to move this frame. Precise scrolls
+                    // apply immediately; discrete scrolls ease toward the target.
+                    const step: f64 = if (!animate)
+                        self.scroll_remaining_px
+                    else step: {
+                        // Snap when nearly done so the animation terminates.
+                        if (@abs(self.scroll_remaining_px) <= scroll_min_step)
+                            break :step self.scroll_remaining_px;
+                        const eased = self.scroll_remaining_px * scroll_ease;
+                        // Keep a minimum speed so the exponential tail doesn't
+                        // crawl asymptotically; this reaches the snap threshold
+                        // in a handful of frames instead of never.
+                        if (@abs(eased) < scroll_min_step)
+                            break :step std.math.sign(self.scroll_remaining_px) * scroll_min_step;
+                        break :step eased;
+                    };
+                    self.scroll_remaining_px -= step;
+                    self.scroll_offset_px += step;
+
+                    // Step whole rows out of the offset, keeping the offset in
+                    // the range [0, cell_h). Using floor (rather than trunc)
+                    // means the residual offset is always non-negative, so the
+                    // grid only ever slides UP and we only need one extra row
+                    // of content at the bottom to fill the revealing edge.
+                    // The viewport delta is positive toward the bottom (newest).
+                    const rows: isize = @intFromFloat(@floor(self.scroll_offset_px / cell_h));
+                    if (rows != 0) {
+                        const pages = &state.terminal.screens.active.pages;
+                        const before = pages.getTopLeft(.viewport);
+                        state.terminal.scrollViewport(.{ .delta = rows });
+                        self.scroll_offset_px -= @as(f64, @floatFromInt(rows)) * cell_h;
+
+                        // If the viewport didn't actually move we hit the top or
+                        // bottom of the scrollback; drop any remaining motion so
+                        // we don't animate against a boundary forever.
+                        if (before.eql(pages.getTopLeft(.viewport))) {
+                            self.scroll_offset_px = 0;
+                            self.scroll_remaining_px = 0;
+                        }
+                    }
+
+                    // Clamp at the bottom boundary. When the viewport is
+                    // pinned to the active area, any positive residual offset
+                    // would render blank space below the last row (and then
+                    // visibly snap back once a full cell accumulates). Stop
+                    // the downward motion exactly at the bottom instead.
+                    if (state.terminal.screens.active.pages.viewport == .active and
+                        self.scroll_offset_px > 0)
+                    {
+                        self.scroll_offset_px = 0;
+                        if (self.scroll_remaining_px > 0) self.scroll_remaining_px = 0;
+                    }
+
+                    // Keep animating while there's motion to ease out. For
+                    // precise (non-animated) scrolls the offset simply holds at
+                    // its sub-cell value with nothing left to ease.
+                    self.scroll_animating = @abs(self.scroll_remaining_px) > scroll_min_step;
+
+                    // Publish the offset to the shaders and force a redraw.
+                    // Also share it with the surface thread so mouse
+                    // hit-testing (selection, clicks) accounts for the shift.
+                    self.uniforms.scroll_offset = @floatCast(self.scroll_offset_px);
+                    state.smooth_scroll.offset_px = self.scroll_offset_px;
+                    self.scroll_dirty = true;
                 }
 
                 // Begin the update of our terminal state. Work that
@@ -1491,6 +1637,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const needs_redraw =
                 size_changed or
                 self.cells_rebuilt or
+                self.scroll_dirty or
                 self.hasAnimations() or
                 sync;
 
@@ -1502,6 +1649,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 return;
             }
             self.cells_rebuilt = false;
+            self.scroll_dirty = false;
 
             // Wait for a frame to be available.
             const frame = try self.swap_chain.nextFrame();

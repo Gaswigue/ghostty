@@ -311,6 +311,7 @@ const DerivedConfig = struct {
     mouse_hide_while_typing: bool,
     mouse_reporting: bool,
     mouse_scroll_multiplier: configpkg.MouseScrollMultiplier,
+    mouse_scroll_smooth: bool,
     mouse_shift_capture: configpkg.MouseShiftCapture,
     fullscreen: configpkg.Fullscreen,
     macos_non_native_fullscreen: configpkg.NonNativeFullscreen,
@@ -390,6 +391,7 @@ const DerivedConfig = struct {
             .mouse_hide_while_typing = config.@"mouse-hide-while-typing",
             .mouse_reporting = config.@"mouse-reporting",
             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
+            .mouse_scroll_smooth = config.@"mouse-scroll-smooth",
             .mouse_shift_capture = config.@"mouse-shift-capture",
             .fullscreen = config.fullscreen,
             .macos_non_native_fullscreen = config.@"macos-non-native-fullscreen",
@@ -3434,36 +3436,44 @@ pub fn scrollCallback(
     // Always show the mouse again if it is hidden
     if (self.mouse.hidden) self.showMouse();
 
-    const y: ScrollAmount = if (yoff == 0) .{} else y: {
-        // We use cell_size to determine if we have accumulated enough to trigger a scroll
+    // The vertical scroll amount in pixels, normalized so that precision and
+    // non-precision (wheel tick) events are both expressed in pixels. Negative
+    // is down. This is the raw amount before any accumulation; it is used both
+    // for the integer row calculation below and for smooth scrolling.
+    const yoff_adjusted: f64 = if (yoff == 0) 0 else if (scroll_mods.precision)
+        // If we have precision scroll, yoff is the number of pixels to scroll.
+        yoff * self.config.mouse_scroll_multiplier.precision
+    else yoff_adjusted: {
+        // In non-precision scroll, yoff is the number of wheel ticks. Some mice
+        // are capable of reporting fractional wheel ticks, which don't
+        // necessarily get reported as precision scrolls. We normalize all
+        // scroll events to pixels by multiplying the wheel tick value and the
+        // cell size. This means that a wheel tick of 1 results in a single
+        // scroll event.
         const cell_size: f64 = @floatFromInt(self.size.cell.height);
 
-        // If we have precision scroll, yoff is the number of pixels to scroll. In non-precision
-        // scroll, yoff is the number of wheel ticks. Some mice are capable of reporting fractional
-        // wheel ticks, which don't necessarily get reported as precision scrolls. We normalize all
-        // scroll events to pixels by multiplying the wheel tick value and the cell size. This means
-        // that a wheel tick of 1 results in single scroll event.
-        const yoff_adjusted: f64 = if (scroll_mods.precision)
-            yoff * self.config.mouse_scroll_multiplier.precision
-        else yoff_adjusted: {
-            if (comptime builtin.target.os.tag.isDarwin()) {
-                // Round out the yoff to an absolute minimum of 1. macos tries to
-                // simulate precision scrolling with non precision events by
-                // ramping up the magnitude of the offsets as it detects faster
-                // scrolling. Single click (very slow) scrolls are reported with a
-                // magnitude of 0.1 which would normally require a few clicks
-                // before we register an actual scroll event (depending on cell
-                // height and the mouse_scroll_multiplier setting).
-                const yoff_max: f64 = if (yoff > 0)
-                    @max(yoff, 1)
-                else
-                    @min(yoff, -1);
+        if (comptime builtin.target.os.tag.isDarwin()) {
+            // Round out the yoff to an absolute minimum of 1. macos tries to
+            // simulate precision scrolling with non precision events by
+            // ramping up the magnitude of the offsets as it detects faster
+            // scrolling. Single click (very slow) scrolls are reported with a
+            // magnitude of 0.1 which would normally require a few clicks
+            // before we register an actual scroll event (depending on cell
+            // height and the mouse_scroll_multiplier setting).
+            const yoff_max: f64 = if (yoff > 0)
+                @max(yoff, 1)
+            else
+                @min(yoff, -1);
 
-                break :yoff_adjusted yoff_max * cell_size * self.config.mouse_scroll_multiplier.discrete;
-            } else {
-                break :yoff_adjusted yoff * cell_size * self.config.mouse_scroll_multiplier.discrete;
-            }
-        };
+            break :yoff_adjusted yoff_max * cell_size * self.config.mouse_scroll_multiplier.discrete;
+        } else {
+            break :yoff_adjusted yoff * cell_size * self.config.mouse_scroll_multiplier.discrete;
+        }
+    };
+
+    const y: ScrollAmount = if (yoff_adjusted == 0) .{} else y: {
+        // We use cell_size to determine if we have accumulated enough to trigger a scroll
+        const cell_size: f64 = @floatFromInt(self.size.cell.height);
 
         // Add our previously saved pending amount to the offset to get the
         // new offset value. The signs of the pending and yoff should match
@@ -3587,7 +3597,16 @@ pub fn scrollCallback(
             return;
         }
 
-        if (y.delta != 0) {
+        if (self.config.mouse_scroll_smooth) {
+            // Hand the raw pixel delta off to the renderer, which advances a
+            // fractional viewport offset each frame (sub-cell precision for
+            // trackpads, eased glide for wheel ticks). We negate because our
+            // delta is negative-down but the viewport is positive-down.
+            if (yoff_adjusted != 0) {
+                self.renderer_state.smooth_scroll.input_px += -yoff_adjusted;
+                self.renderer_state.smooth_scroll.animate = !scroll_mods.precision;
+            }
+        } else if (y.delta != 0) {
             // Modify our viewport, this requires a lock since it affects
             // rendering. We have to switch signs here because our delta
             // is negative down but our viewport is positive down.
@@ -4724,8 +4743,17 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 }
 
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
+    // Account for the smooth-scroll offset: the rendered content is shifted
+    // up by this many pixels, so the content under the cursor is that many
+    // pixels further down in unshifted grid space. Without this, selection
+    // and clicks can land one row off while a fractional offset is applied.
+    const yoff: f64 = if (self.config.mouse_scroll_smooth)
+        self.renderer_state.smooth_scroll.offset_px
+    else
+        0;
+
     // Get our grid cell
-    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
+    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos + yoff } };
     const grid = coord.convert(.grid, self.size).grid;
     return .{ .x = grid.x, .y = grid.y };
 }

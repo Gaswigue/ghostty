@@ -567,6 +567,10 @@ fn wakeupCallback(
     // it here covers output, resize, and viewport scrolling uniformly.
     t.compression.wake(t);
 
+    // If the render above started (or is continuing) a smooth scroll
+    // animation, make sure our scroll animation timer is running.
+    t.syncScrollTimer();
+
     // The below is not used anymore but if we ever want to introduce
     // a configuration to introduce a delay to coalesce renders, we can
     // use this.
@@ -655,6 +659,60 @@ fn renderCallback(
 
     // Draw
     t.drawFrame(false);
+
+    return .disarm;
+}
+
+/// Arm the smooth-scroll animation timer if the renderer has a scroll
+/// animation in flight and the timer isn't already running. This reuses the
+/// otherwise-idle `render_h` timer to drive periodic full renders (which
+/// advance the fractional scroll offset in `updateFrame`) until the scroll
+/// settles. See `mouse-scroll-smooth`.
+fn syncScrollTimer(self: *Thread) void {
+    if (!(@hasDecl(rendererpkg.Renderer, "hasScrollAnimation") and
+        self.renderer.hasScrollAnimation())) return;
+
+    // Already running.
+    if (self.render_c.state() == .active) return;
+
+    self.render_h.run(
+        &self.loop,
+        &self.render_c,
+        DRAW_INTERVAL,
+        Thread,
+        self,
+        scrollTimerCallback,
+    );
+}
+
+fn scrollTimerCallback(
+    self_: ?*Thread,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = r catch unreachable;
+    const t: *Thread = self_ orelse {
+        log.warn("scroll timer fired without data set", .{});
+        return .disarm;
+    };
+
+    // A full render advances the fractional scroll offset in updateFrame and
+    // redraws. Keep firing until the animation settles.
+    _ = renderCallback(t, undefined, undefined, {});
+
+    if (@hasDecl(rendererpkg.Renderer, "hasScrollAnimation") and
+        t.renderer.hasScrollAnimation())
+    {
+        t.render_h.run(
+            &t.loop,
+            &t.render_c,
+            DRAW_INTERVAL,
+            Thread,
+            t,
+            scrollTimerCallback,
+        );
+    }
 
     return .disarm;
 }

@@ -46,8 +46,9 @@ void main() {
     bool cursor_wide = (bools & CURSOR_WIDE) != 0;
     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
 
-    // Convert the grid x, y into world space x, y by accounting for cell size
-    vec2 cell_pos = cell_size * vec2(grid_pos);
+    // Convert the grid x, y into world space x, y by accounting for cell size.
+    // Shift up by the smooth-scroll offset to render a sub-cell scroll position.
+    vec2 cell_pos = cell_size * vec2(grid_pos) - vec2(0.0f, scroll_offset);
 
     int vid = gl_VertexID;
 

@@ -197,6 +197,11 @@ pub const Uniforms = extern struct {
     /// Various booleans, in a packed struct for space efficiency.
     bools: Bools align(4),
 
+    /// Vertical smooth-scroll offset in pixels. Content is shifted up by this
+    /// amount to render a sub-cell (fractional) scroll position. See
+    /// `mouse-scroll-smooth`.
+    scroll_offset: f32 align(4) = 0,
+
     const Bools = packed struct(u32) {
         /// Whether the cursor is 2 cells wide.
         cursor_wide: bool,

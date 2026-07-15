@@ -24,6 +24,7 @@ struct Uniforms {
   bool use_display_p3;
   bool use_linear_blending;
   bool use_linear_correction;
+  float scroll_offset;
 };
 
 //-------------------------------------------------------------------
@@ -453,7 +454,9 @@ fragment float4 cell_bg_fragment(
   constant Uniforms& uniforms [[buffer(1)]],
   constant uchar4 *cells [[buffer(2)]]
 ) {
-  int2 grid_pos = int2(floor((in.position.xy - uniforms.grid_padding.wx) / uniforms.cell_size));
+  // Add the smooth-scroll offset so each screen pixel maps to the cell that
+  // has been shifted up by `scroll_offset` pixels in the vertex shaders.
+  int2 grid_pos = int2(floor((in.position.xy - uniforms.grid_padding.wx + float2(0.0f, uniforms.scroll_offset)) / uniforms.cell_size));
 
   float4 bg = float4(0.0);
 
@@ -559,8 +562,9 @@ vertex CellTextVertexOut cell_text_vertex(
   constant Uniforms& uniforms [[buffer(1)]],
   constant uchar4 *bg_colors [[buffer(2)]]
 ) {
-  // Convert the grid x, y into world space x, y by accounting for cell size
-  float2 cell_pos = uniforms.cell_size * float2(in.grid_pos);
+  // Convert the grid x, y into world space x, y by accounting for cell size.
+  // Shift up by the smooth-scroll offset to render a sub-cell scroll position.
+  float2 cell_pos = uniforms.cell_size * float2(in.grid_pos) - float2(0.0f, uniforms.scroll_offset);
 
   // We use a triangle strip with 4 vertices to render quads,
   // so we determine which corner of the cell this vertex is in
@@ -819,8 +823,9 @@ vertex ImageVertexOut image_vertex(
   ImageVertexOut out;
 
   // The position of our image starts at the top-left of the grid cell and
-  // adds the source rect width/height components.
-  float2 image_pos = (uniforms.cell_size * in.grid_pos) + in.cell_offset;
+  // adds the source rect width/height components. Shift up by the
+  // smooth-scroll offset so images track the text grid.
+  float2 image_pos = (uniforms.cell_size * in.grid_pos) + in.cell_offset - float2(0.0f, uniforms.scroll_offset);
   image_pos += in.dest_size * corner;
 
   out.position =
