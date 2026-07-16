@@ -238,6 +238,12 @@ const Mouse = struct {
     pending_scroll_x: f64 = 0,
     pending_scroll_y: f64 = 0,
 
+    /// Scroll acceleration state (see `mouse-scroll-acceleration`). We track
+    /// a decaying "velocity" that ramps up when discrete wheel ticks arrive in
+    /// quick succession, so faster scrolling covers more distance per tick.
+    scroll_accel_velocity: f64 = 0,
+    scroll_accel_last: ?std.time.Instant = null,
+
     /// True if the mouse is hidden
     hidden: bool = false,
 
@@ -311,6 +317,7 @@ const DerivedConfig = struct {
     mouse_hide_while_typing: bool,
     mouse_reporting: bool,
     mouse_scroll_multiplier: configpkg.MouseScrollMultiplier,
+    mouse_scroll_acceleration: f64,
     mouse_shift_capture: configpkg.MouseShiftCapture,
     fullscreen: configpkg.Fullscreen,
     macos_non_native_fullscreen: configpkg.NonNativeFullscreen,
@@ -390,6 +397,7 @@ const DerivedConfig = struct {
             .mouse_hide_while_typing = config.@"mouse-hide-while-typing",
             .mouse_reporting = config.@"mouse-reporting",
             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
+            .mouse_scroll_acceleration = config.@"mouse-scroll-acceleration",
             .mouse_shift_capture = config.@"mouse-shift-capture",
             .fullscreen = config.fullscreen,
             .macos_non_native_fullscreen = config.@"macos-non-native-fullscreen",
@@ -3446,6 +3454,33 @@ pub fn scrollCallback(
         const yoff_adjusted: f64 = if (scroll_mods.precision)
             yoff * self.config.mouse_scroll_multiplier.precision
         else yoff_adjusted: {
+            // Scroll acceleration: track a decaying "velocity" that ramps up
+            // when wheel ticks arrive in quick succession so that faster
+            // scrolling covers more distance per tick. See
+            // `mouse-scroll-acceleration`.
+            const accel: f64 = accel: {
+                const max_accel = self.config.mouse_scroll_acceleration;
+                if (max_accel <= 1.0) break :accel 1.0;
+
+                // Velocity decays with a ~150ms time constant and saturates
+                // the acceleration after ~vmax consecutive fast ticks.
+                const tau_ns: f64 = 150 * std.time.ns_per_ms;
+                const vmax: f64 = 12.0;
+
+                const now = std.time.Instant.now() catch break :accel 1.0;
+                if (self.mouse.scroll_accel_last) |last| {
+                    const dt: f64 = @floatFromInt(now.since(last));
+                    self.mouse.scroll_accel_velocity *= @exp(-dt / tau_ns);
+                } else {
+                    self.mouse.scroll_accel_velocity = 0;
+                }
+                self.mouse.scroll_accel_last = now;
+                self.mouse.scroll_accel_velocity += 1;
+
+                const v = @min(self.mouse.scroll_accel_velocity, vmax);
+                break :accel 1.0 + (v / vmax) * (max_accel - 1.0);
+            };
+
             if (comptime builtin.target.os.tag.isDarwin()) {
                 // Round out the yoff to an absolute minimum of 1. macos tries to
                 // simulate precision scrolling with non precision events by
@@ -3459,9 +3494,9 @@ pub fn scrollCallback(
                 else
                     @min(yoff, -1);
 
-                break :yoff_adjusted yoff_max * cell_size * self.config.mouse_scroll_multiplier.discrete;
+                break :yoff_adjusted yoff_max * cell_size * self.config.mouse_scroll_multiplier.discrete * accel;
             } else {
-                break :yoff_adjusted yoff * cell_size * self.config.mouse_scroll_multiplier.discrete;
+                break :yoff_adjusted yoff * cell_size * self.config.mouse_scroll_multiplier.discrete * accel;
             }
         };
 

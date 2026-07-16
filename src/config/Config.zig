@@ -990,6 +990,22 @@ palette: Palette = .{},
 /// The default value is "3" for discrete devices and "1" for precision devices.
 @"mouse-scroll-multiplier": MouseScrollMultiplier = .default,
 
+/// Acceleration for discrete (mouse wheel) scrolling.
+///
+/// When scrolling the wheel quickly, each tick covers progressively more
+/// distance, up to this multiplier at full speed. This makes it easier to
+/// traverse large amounts of scrollback while still allowing precise,
+/// line-by-line scrolling when scrolling slowly.
+///
+/// A value of `1` (the default) disables acceleration. Larger values increase
+/// the maximum speed-up: e.g. `3` scrolls up to 3x faster during a rapid
+/// flick. The value is clamped to [1, 100].
+///
+/// This only affects discrete devices (mouse wheels). Precise devices
+/// (trackpads) already report velocity-scaled deltas from the OS and are not
+/// affected. Acceleration is applied on top of `mouse-scroll-multiplier`.
+@"mouse-scroll-acceleration": f64 = 1.0,
+
 /// The opacity level (opposite of transparency) of the background. A value of
 /// 1 is fully opaque and a value of 0 is fully transparent. A value less than 0
 /// or greater than 1 will be clamped to the nearest valid value.
@@ -4710,6 +4726,9 @@ pub fn finalize(self: *Config) !void {
     // Clamp our mouse scroll multiplier
     self.@"mouse-scroll-multiplier".precision = @min(10_000.0, @max(0.01, self.@"mouse-scroll-multiplier".precision));
     self.@"mouse-scroll-multiplier".discrete = @min(10_000.0, @max(0.01, self.@"mouse-scroll-multiplier".discrete));
+
+    // Clamp scroll acceleration to a sane range. 1 disables acceleration.
+    self.@"mouse-scroll-acceleration" = @min(100.0, @max(1.0, self.@"mouse-scroll-acceleration"));
 
     // Clamp our split opacity
     self.@"unfocused-split-opacity" = @min(1.0, @max(0.15, self.@"unfocused-split-opacity"));
