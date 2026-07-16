@@ -22,6 +22,9 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             .omit_frame_pointer = false,
             .unwind_tables = .sync,
         }),
+        // The self-hosted linker can't handle the .sframe sections emitted
+        // by recent glibc/GCC toolchains (R_X86_64_PC64 relocations).
+        .use_llvm = true,
     });
     build_data_exe.linkLibC();
 

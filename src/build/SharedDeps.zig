@@ -881,6 +881,9 @@ pub fn gtkNgDistResources(
                 .root_source_file = b.path("src/apprt/gtk/build/gresource.zig"),
                 .target = b.graph.host,
             }),
+            // The self-hosted linker can't handle the .sframe sections emitted
+            // by recent glibc/GCC toolchains (R_X86_64_PC64 relocations).
+            .use_llvm = true,
         });
         const xml_run = b.addRunArtifact(xml_exe);
 
@@ -891,6 +894,9 @@ pub fn gtkNgDistResources(
                 .root_source_file = b.path("src/apprt/gtk/build/blueprint.zig"),
                 .target = b.graph.host,
             }),
+            // The self-hosted linker can't handle the .sframe sections emitted
+            // by recent glibc/GCC toolchains (R_X86_64_PC64 relocations).
+            .use_llvm = true,
         });
         blueprint_exe.linkLibC();
         blueprint_exe.linkSystemLibrary2("gtk4", dynamic_link_opts);
